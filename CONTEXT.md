@@ -1,4 +1,4 @@
-# log-tool-tka 项目上下文
+# log-tool-tha 项目上下文
 
 > 本文档是从 Oberon 工程迁出时整理的全部背景信息（2026-08-26）。新会话/新协作者先读这里即可接续工作，无需回隔壁仓库翻代码。
 >
@@ -94,7 +94,8 @@ spdlog::flush_every(std::chrono::seconds(1));
 | --- | --- |
 | 2026-08-26 | 从 `../Oberon/log-tool/`（原 git 忽略的骨架子项目）迁出，转为独立项目开发 |
 | 2026-08-26 | 定位：**仅服务 Oberon(THA)**，不做通用化 |
-| 2026-08-26 | 项目路径：`/home/sad/jjcode/jt-001/log-tool-tka` |
+| 2026-08-26 | 项目路径曾为 `/home/sad/jjcode/jt-001/log-tool-tka` |
+| 2026-08-29 | 本地目录改名为 `log-tool-tha`，与 GitHub 仓库 [TomasDo/log-tool-tha](https://github.com/TomasDo/log-tool-tha) 对齐 |
 | 2026-08-26 | 技术选型沿用：Python + Flask Web 可视化（原对话默认方案，未被否决） |
 | 备注 | 发现 `../jt-002/Titan/build/.../tka_logs/log_file_*.txt` 与 Oberon 格式完全相同；当前明确不纳入范围，仅记录 |
 
