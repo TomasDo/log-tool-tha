@@ -87,6 +87,7 @@
 | KUKA | `kuka app is connected` / `disconnected` |
 | 示踪器 | `marker data is invalid` |
 | MXIO | `connect mxio` |
+| 工具 | `set tool type new metal tool`、`set tool side left/right`、`set reamer rod:`、`set cup rod:` |
 
 ---
 

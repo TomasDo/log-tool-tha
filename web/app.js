@@ -61,6 +61,7 @@ const DEV_COLOR = {
   设备准备3: "#60a5fa",
   设备准备4: "#60a5fa",
   设备准备5: "#60a5fa",
+  工具: "#e8b84a",
 };
 const LOG_COLOR = {
   重点: "#e8b84a",

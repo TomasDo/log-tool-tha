@@ -96,6 +96,9 @@
 | robot emergency stop button external is released | contains | 急停松开 | robot | show | none | |
 | connect mxio sucess | contains | MXIO 连接成功 | key | show | none | 源码拼写 sucess |
 | set effector side | contains | 末端侧别 | robot | show | none | |
+| set tool type: | contains | 工具类型编号 | key | hide | none | 与「选择工具类型」同时打的数字回显 |
+| set tool type \d | regex | 工具类型编号 | key | hide | none | |
+| set tool side \d | regex | 工具侧别编号 | key | hide | none | |
 
 ---
 
@@ -116,6 +119,11 @@
 | sparse point | contains | 配准稀疏采集 | key | hide | none |  | 三级；完成看 RMSE |
 | dense point | contains | 配准密采集 | key | hide | none |  | 三级 |
 | verify point | contains | 配准验证点 | key | hide | none |  | 勿与 cup verified point 混淆（表内更长串优先） |
+| set tool type new metal tool | contains | 选择工具类型 | key | show | key |  | 设备准备 / 髋导航；现场几乎都是 new metal tool |
+| set tool side left | contains | 选择工具侧别 | key | show | key |  | |
+| set tool side right | contains | 选择工具侧别 | key | show | key |  | |
+| set reamer rod: | contains | 选择磨头杆 | key | show | key |  | 髋臼打磨页内选杆 |
+| set cup rod: | contains | 选择装杯杆 | key | show | key |  | 安装髋臼杯页内选杆 |
 
 ---
 

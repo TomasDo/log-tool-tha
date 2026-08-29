@@ -64,6 +64,30 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(start["step"], "开始手术")
         self.assertEqual(start["mark"], "key")
 
+    def test_tool_selection_is_key(self):
+        named = SPEC.classify("set tool type new metal tool", "", "I")
+        self.assertEqual(named["step"], "选择工具类型")
+        self.assertEqual(named["mark"], "key")
+        self.assertEqual(named["timeline"], "show")
+        side = SPEC.classify("set tool side left", "", "I")
+        self.assertEqual(side["step"], "选择工具侧别")
+        self.assertEqual(side["mark"], "key")
+        reamer = SPEC.classify("set reamer rod: right rod", "", "I")
+        self.assertEqual(reamer["step"], "选择磨头杆")
+        self.assertEqual(reamer["mark"], "key")
+        cup = SPEC.classify("set cup rod:  yozx install rod", "", "I")
+        self.assertEqual(cup["step"], "选择装杯杆")
+        self.assertEqual(cup["mark"], "key")
+        echo_colon = SPEC.classify("set tool type: 2", "", "I")
+        self.assertEqual(echo_colon["timeline"], "hide")
+        self.assertNotEqual(echo_colon["mark"], "key")
+        echo_num = SPEC.classify("set tool type 2", "", "I")
+        self.assertEqual(echo_num["timeline"], "hide")
+        self.assertNotEqual(echo_num["mark"], "key")
+        echo_side = SPEC.classify("set tool side 1", "", "I")
+        self.assertEqual(echo_side["timeline"], "hide")
+        self.assertNotEqual(echo_side["mark"], "key")
+
 
 class NleTests(unittest.TestCase):
     def test_uuid_merge_and_labels(self):

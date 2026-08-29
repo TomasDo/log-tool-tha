@@ -163,6 +163,10 @@ def match_device(msg: str) -> tuple[str, str | None]:
         return "tick", "示踪器"
     if "hard switch" in low or "soft switch" in low or "handguding" in low:
         return "tick", "示教开关"
+    if "set reamer rod:" in low or "set cup rod:" in low:
+        return "tick", "工具"
+    if "set tool type new metal tool" in low or "set tool side left" in low or "set tool side right" in low:
+        return "tick", "工具"
     return "none", None
 
 
