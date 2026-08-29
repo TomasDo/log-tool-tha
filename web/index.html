@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Oberon 日志时间轴</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div id="app">
+    <aside id="sidebar">
+      <header class="side-head">
+        <div class="brand">
+          <span class="logo">THA</span>
+          <div>
+            <h1>Oberon 日志时间轴</h1>
+            <p class="sub">规则来自 docs/oberon-log-spec.md</p>
+          </div>
+        </div>
+        <label class="upload-btn">
+          导入日志
+          <input id="file-input" type="file" multiple accept=".txt,.log,text/plain" />
+        </label>
+        <p id="upload-status" class="hint"></p>
+      </header>
+      <ul id="file-list"></ul>
+      <footer class="side-foot">
+        <button id="reload-spec" type="button">重新加载规则</button>
+        <span id="spec-info"></span>
+      </footer>
+    </aside>
+    <main id="main">
+      <div id="empty-state">
+        <h2>选择或导入一份日志</h2>
+        <p>一次只查看一个文件。上方是原始日志终端，下方是按行号对齐的多轨时间轴。</p>
+      </div>
+      <section id="timeline-wrap" hidden>
+        <header id="tl-head">
+          <div>
+            <h2 id="tl-title"></h2>
+            <p id="tl-meta"></p>
+          </div>
+          <div id="counts"></div>
+        </header>
+        <div id="tl-toolbar">
+          <label><input type="checkbox" id="tog-noise" /> 显示噪声</label>
+          <label><input type="checkbox" id="tog-all" /> 显示全部</label>
+          <span id="return-count"></span>
+          <span id="play-info"></span>
+        </div>
+        <div id="workspace">
+          <div id="term-wrap">
+            <div id="term"></div>
+            <button id="btn-follow" type="button" hidden>跟随播放头</button>
+          </div>
+          <div id="split" title="拖动调整高度"></div>
+          <div id="nle">
+            <div id="nle-tools">
+              <button type="button" id="btn-zoom-out" title="缩小">−</button>
+              <button type="button" id="btn-zoom-in" title="放大">+</button>
+              <button type="button" id="btn-zoom-fit">适应窗口</button>
+              <span id="nle-hint">拖动平移轨道 · 点选跳转 · 按钮缩放</span>
+            </div>
+            <div id="nle-main">
+              <canvas id="overview"></canvas>
+              <div id="nle-labels"></div>
+              <canvas id="nle-canvas"></canvas>
+              <aside id="nle-legend"></aside>
+            </div>
+            <section id="plan-summary-wrap" hidden>
+              <h3>方案汇总</h3>
+              <div id="plan-summary"></div>
+            </section>
+            <div id="nle-tip" hidden></div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>

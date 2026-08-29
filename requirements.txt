@@ -1,0 +1,4 @@
+# The server uses the Python 3 standard library only (http.server).
+# Optional, if you prefer FastAPI:
+# fastapi>=0.110
+# uvicorn>=0.27
