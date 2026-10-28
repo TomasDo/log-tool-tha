@@ -1,4 +1,5 @@
 """Parse Oberon spdlog daily-logger files into classified events."""
+
 from __future__ import annotations
 
 import re
@@ -8,7 +9,7 @@ from pathlib import Path
 from spec import Spec
 
 LOG_RE = re.compile(
-    r"^\[(\d{2}:\d{2}:\d{2}) ([+\-]\d{2}:\d{2})\] "
+    r"^\[(\d{2}:\d{2}:\d{2}) ([+\-]\d{2}:?\d{2})\] "
     r"\[(\w+)\] "
     r"\[---([TDIWEC])---\] "
     r"\[thread (\d+)\] ?(.*)$"
@@ -18,10 +19,7 @@ CST = timezone(timedelta(hours=8))
 
 MAX_EVENTS_PAYLOAD = 50_000
 
-START_OP = "start operation"
-EXIT_APP = "Oberon Application Exit"
 STARTUP_APP = "Oberon Application Startup"
-END_SURGERY = "enter poster operation page"
 
 
 def extract_date_from_name(name: str) -> str | None:
@@ -34,7 +32,9 @@ def date_from_mtime(path: Path) -> str:
     return ts.strftime("%Y-%m-%d")
 
 
-def resolve_file_date(path: Path, original_name: str | None = None) -> tuple[str | None, str]:
+def resolve_file_date(
+    path: Path, original_name: str | None = None
+) -> tuple[str | None, str]:
     name = original_name or path.name
     d = extract_date_from_name(name)
     if d:
@@ -87,7 +87,7 @@ def parse_log_lines(lines: list[str], file_date: str | None) -> list[dict]:
 
     for i, raw_line in enumerate(lines, 1):
         line = raw_line.rstrip("\n\r")
-        m = LOG_RE.match(line)
+        m = LOG_RE.match(line.lstrip("\ufeff"))
         if m:
             flush_unmatched()
             hhmmss, tz, logger, level, thread, message = m.groups()
@@ -111,7 +111,65 @@ def parse_log_lines(lines: list[str], file_date: str | None) -> list[dict]:
         else:
             pending.append((i, line))
     flush_unmatched()
-    return events
+    merged = []
+    for ev in events:
+        crash = bool(
+            re.search(
+                r"(?m)^(?:[= ]*CRASH DETECTED[= ]*|Caught signal\s+\d+\b[^\n]*)$",
+                ev["raw"],
+            )
+        )
+        if (
+            crash
+            and merged
+            and merged[-1].get("level") in ("E", "C")
+            and not merged[-1]["message"].strip()
+        ):
+            header = merged.pop()
+            header.update(
+                line_end=ev["line_end"],
+                raw=header["raw"] + "\n" + ev["raw"],
+                message=ev["message"],
+                block=True,
+            )
+            merged.append(header)
+        else:
+            merged.append(ev)
+    return merged
+
+
+def inspect_content(content: bytes) -> dict:
+    text = content.decode("utf-8", errors="replace")
+    if not content or not text.strip("\ufeff\x00 \r\n\t"):
+        raise ValueError("日志为空或全部为零字节，无法分析")
+    if "Titan Application Startup" in text:
+        raise ValueError("检测到 Titan 日志，本工具仅分析 Oberon")
+    oberon = any(
+        token in text
+        for token in (
+            "Oberon Application Startup",
+            "start load plan uuid",
+            "switch register hip step",
+            "hip register calculate error",
+            "ras coordinate realtime",
+            "app coordinate realtime",
+            "switch polish hip step",
+            "switch install hip cup step",
+        )
+    )
+    warnings = []
+    if not oberon:
+        warnings.append("无法确认是 Oberon 日志，仅供原文查看")
+    elif STARTUP_APP not in text:
+        warnings.append("日志片段缺少软件启动行，记录可能不完整")
+    if "\x00" in text:
+        warnings.append("文件包含零字节，部分记录可能损坏")
+    return {
+        "product": "oberon" if oberon else "unknown",
+        "analyzable": oberon,
+        "partial": oberon and STARTUP_APP not in text,
+        "warnings": warnings,
+    }
 
 
 def _session_flag(step: str, category: str) -> str | None:
@@ -130,26 +188,75 @@ def classify_events(events: list[dict], spec: Spec) -> list[dict]:
     current_group = ""
     current_page = ""
     in_surgery = False
+    manual_restart = None
     out = []
-    for ev in events:
-        msg = ev.get("message") or ""
-        if STARTUP_APP in msg:
+    classes = [
+        spec.classify(e.get("message") or "", e.get("raw") or "", e.get("level"))
+        for e in events
+    ]
+    for i, (ev, cls) in enumerate(zip(events, classes)):
+        eid = cls.get("event_id")
+        error_level = ev.get("level") in ("E", "C")
+        if eid in ("startup", "plan_load"):
             in_surgery = False
-        if START_OP in msg:
+            manual_restart = None
+            current_group = current_page = ""
+        if eid == "operation_start":
             in_surgery = True
-        cls = spec.classify(msg, ev.get("raw") or "", ev.get("level"))
-
-        if "kuka app is disconnected" in msg.lower():
-            if in_surgery:
-                cls["mark"] = "anomaly"
-                cls["timeline"] = "show"
-                cls["step"] = "KUKA 断开"
-            else:
-                cls["mark"] = "none"
-                cls["timeline"] = "hide"
-                cls["step"] = "KUKA 断开（非术中）"
-
-        if EXIT_APP in msg or END_SURGERY in msg:
+            manual_restart = None
+        if eid == "sirius_manual_restart":
+            manual_restart = ev["line"]
+        if eid == "kuka_disconnected":
+            if not error_level and (manual_restart is not None or not in_surgery):
+                reason = (
+                    f"此前有人工重启请求（行 {manual_restart}），断开记录保留为提醒；未证明连接已恢复"
+                    if manual_restart is not None
+                    else "本区间未记录明确的手术开始，断开状态保留为提醒，不推断为术中故障"
+                )
+                cls.update(mark="key", timeline="show", notes=reason)
+            manual_restart = None
+        if eid == "mxio_fault" and not error_level:
+            for following, next_cls in zip(events[i + 1 :], classes[i + 1 :]):
+                next_id = next_cls.get("event_id")
+                if next_id in (
+                    "startup",
+                    "plan_load",
+                    "operation_start",
+                    "exit",
+                    "crash",
+                    "mxio_fault",
+                    "mxio_normal",
+                ):
+                    break
+                if next_id == "teach_custom" and following.get("level") not in (
+                    "E",
+                    "C",
+                ):
+                    cls.update(
+                        mark="key",
+                        timeline="show",
+                        step="MXIO 连接失败，启用替代模块监听",
+                        notes=f"行 {following['line']} 记录启用自定义示教模块监听；属于已记录的回退流程，不代表模块已连接或示教可用",
+                    )
+                    break
+        if eid == "emergency_pressed" and not in_surgery and not error_level:
+            cls.update(
+                mark="key",
+                timeline="show",
+                notes="急停按下状态；本区间未记录手术开始，保留为安全状态提醒，不直接认定软件故障",
+            )
+        if eid in (
+            "kuka_connected",
+            "devices_normal",
+            "kuka_fault",
+            "ndi_fault",
+            "devices_fault",
+            "exit",
+            "crash",
+            "page_postop",
+        ):
+            manual_restart = None
+        if eid in ("exit", "page_postop", "crash"):
             in_surgery = False
 
         step = cls["step"]
@@ -158,7 +265,7 @@ def classify_events(events: list[dict], spec: Spec) -> list[dict]:
             current_page = step
         if cat in ("lifecycle", "page", "step") and cls["timeline"] == "show" and step:
             current_group = step
-        sess = _session_flag(step, cat)
+        sess = {"startup": "startup", "exit": "exit"}.get(cls.get("event_id"))
         item = dict(ev)
         item.update(
             {
@@ -173,6 +280,12 @@ def classify_events(events: list[dict], spec: Spec) -> list[dict]:
                 "session": sess,
                 "value_mm": cls.get("value_mm"),
                 "threshold": cls.get("threshold"),
+                "event_id": cls.get("event_id", ""),
+                "limits": dict(spec.limits),
+                "requirements": spec.requirements,
+                "track": cls.get("track", ""),
+                "parent": cls.get("parent", ""),
+                "notes": cls.get("notes", ""),
             }
         )
         out.append(item)
@@ -217,14 +330,18 @@ def summarize(events: list[dict]) -> dict:
     }
 
 
-def filter_events(events: list[dict], show_noise: bool = False, show_all: bool = False) -> list[dict]:
+def filter_events(
+    events: list[dict], show_noise: bool = False, show_all: bool = False
+) -> list[dict]:
     if show_all:
         return events
     out = []
     for ev in events:
         if ev.get("source") == "unmatched":
             continue
-        if (ev.get("source") == "noise" or ev.get("category") == "noise") and not show_noise:
+        if (
+            ev.get("source") == "noise" or ev.get("category") == "noise"
+        ) and not show_noise:
             if ev.get("mark") == "anomaly":
                 out.append(ev)
             continue
@@ -259,16 +376,49 @@ def to_public_event(ev: dict, idx: int) -> dict:
         "threshold": ev.get("threshold"),
         "block": bool(ev.get("block")),
         "hlevel": ev.get("hlevel"),
+        **{
+            k: ev.get(k)
+            for k in (
+                "event_id",
+                "session_id",
+                "case_id",
+                "context",
+                "metrics",
+                "notes",
+                "threshold",
+            )
+        },
     }
 
 
-def parse_and_classify(path: Path, spec: Spec, original_name: str | None = None) -> tuple[list[dict], dict]:
+def parse_and_classify(
+    path: Path,
+    spec: Spec,
+    original_name: str | None = None,
+    source_mtime: float | None = None,
+) -> tuple[list[dict], dict]:
     file_date, date_source = resolve_file_date(path, original_name)
-    text = path.read_text(encoding="utf-8", errors="replace")
+    content = path.read_bytes()
+    quality = inspect_content(content)
+    if not extract_date_from_name(original_name or path.name):
+        file_date = (
+            datetime.fromtimestamp(source_mtime, CST).strftime("%Y-%m-%d")
+            if source_mtime is not None
+            else None
+        )
+        date_source = "mtime" if source_mtime is not None else "unknown"
+    text = content.decode("utf-8", errors="replace")
     lines = text.splitlines()
     raw_events = parse_log_lines(lines, file_date)
     events = classify_events(raw_events, spec)
+    if quality["analyzable"]:
+        from nle import collect_cut_deltas
+
+        collect_cut_deltas(events)
+    else:
+        events = []
     meta = summarize(events)
+    meta["file_quality"] = quality
     meta["line_count"] = len(lines)
     meta["date"] = file_date
     meta["date_source"] = date_source

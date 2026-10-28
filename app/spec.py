@@ -3,10 +3,12 @@
 Classification tables must have a 日志匹配 / match column. The business-order
 table (顺序 / 源码页面) and the 级别规则 table are skipped automatically.
 
-Section keywords: 步骤映射, 关键信息, 异常, 噪声.
+Section keywords: 步骤映射, 关键信息, 设置与切换, 异常, 噪声.
 """
+
 from __future__ import annotations
 
+import math
 import re
 import time
 from pathlib import Path
@@ -109,8 +111,22 @@ def apply_threshold(out: dict, rule: dict, message: str) -> dict:
     thr = rule.get("threshold")
     if thr is None:
         return out
-    val = extract_last_mm(message)
-    if val is None:
+    if out.get("event_id") in ("probe_error", "effector_error", "hip_error"):
+        try:
+            val = float(message.split()[-1])
+        except (ValueError, IndexError):
+            val = None
+    else:
+        val = extract_last_mm(message)
+    if val is None or not math.isfinite(val) or val < 0:
+        out.update(
+            value_mm=None,
+            threshold=thr,
+            event_id=out.get("event_id", "") + "_invalid",
+            mark="anomaly",
+            timeline="show",
+            notes="标定／配准误差无效（非有限数、负值或无法解析），不能作为有效完成证据",
+        )
         return out
     out["value_mm"] = val
     out["threshold"] = thr
@@ -137,6 +153,12 @@ def _is_separator(cells: list[str]) -> bool:
 def _col_field(header: str) -> str | None:
     h = header.strip()
     n = re.sub(r"\s+", "", h).lower()
+    if n in ("event_id", "事件id"):
+        return "event_id"
+    if n in ("track", "轨道"):
+        return "track"
+    if n in ("parent", "父页面"):
+        return "parent"
     if "日志匹配" in h or n in ("match", "pattern", "匹配"):
         return "match"
     if "匹配方式" in h or n in ("mode", "方式"):
@@ -175,6 +197,8 @@ def _norm(value: str, aliases: dict[str, str], default: str) -> str:
 def _section_of(heading: str) -> str | None:
     h = heading.strip()
     hl = h.lower()
+    if "设置与切换" in h or "设备控制操作" in h:
+        return "operation"
     if any(k in h for k in ("软件页面与步骤", "业务顺序")):
         return "skip"
     if "噪声" in h or "noise" in hl:
@@ -222,6 +246,9 @@ def parse_table(table_lines: list[str]) -> list[dict] | None:
             "notes": (rec.get("notes") or "").strip(),
             "level": (rec.get("level") or "").strip().upper(),
             "threshold": parse_threshold_cell(rec.get("threshold") or ""),
+            "event_id": rec.get("event_id", ""),
+            "track": rec.get("track", ""),
+            "parent": rec.get("parent", ""),
             "regex": None,
         }
         if mode == "regex":
@@ -229,7 +256,9 @@ def parse_table(table_lines: list[str]) -> list[dict] | None:
                 rule["regex"] = re.compile(pattern)
             except re.error:
                 rule["mode"] = "contains"
-                rule["notes"] = (rule["notes"] + " [invalid regex, fallback contains]").strip()
+                rule["notes"] = (
+                    rule["notes"] + " [invalid regex, fallback contains]"
+                ).strip()
         rules.append(rule)
     return rules
 
@@ -237,7 +266,7 @@ def parse_table(table_lines: list[str]) -> list[dict] | None:
 def parse_spec_text(text: str) -> dict:
     lines = text.splitlines()
     section = None
-    buckets = {"mapping": [], "key": [], "anomaly": [], "noise": []}
+    buckets = {"mapping": [], "key": [], "operation": [], "anomaly": [], "noise": []}
     i = 0
     n = len(lines)
     while i < n:
@@ -289,16 +318,19 @@ class Spec:
         self.mtime: float | None = None
         self.mapping: list[dict] = []
         self.key: list[dict] = []
+        self.operation: list[dict] = []
         self.anomaly: list[dict] = []
         self.noise: list[dict] = []
         self.error: str | None = None
         self.loaded_at: float | None = None
+        self.requirements = []
+        self.limits = {"angle_key": 1.0, "angle_anomaly": 2.0}
         self.reload(force=True)
 
     def reload(self, force: bool = False) -> bool:
         if not self.path.exists():
             self.error = f"spec not found: {self.path}"
-            self.mapping = self.key = self.anomaly = self.noise = []
+            self.mapping = self.key = self.operation = self.anomaly = self.noise = []
             return False
         mtime = self.path.stat().st_mtime
         if not force and self.mtime is not None and mtime == self.mtime:
@@ -306,15 +338,40 @@ class Spec:
         try:
             text = self.path.read_text(encoding="utf-8")
             buckets = parse_spec_text(text)
+            limits = dict(self.limits)
+            for key, val in re.findall(r"<!-- threshold:(\w+)=([0-9.]+) -->", text):
+                if key in limits:
+                    limits[key] = float(val)
+            if limits["angle_key"] > limits["angle_anomaly"]:
+                self.error = "角度提醒阈值不能大于异常阈值"
+                return False
+            required_section = text.split("## 必要步骤配置", 1)
+            requirements = []
+            if len(required_section) == 2:
+                table = required_section[1].split("\n## ", 1)[0]
+                for line in table.splitlines():
+                    cells = _cells(line) if line.startswith("|") else []
+                    if len(cells) == 4 and cells[0] not in ("要求ID", "---"):
+                        requirements.append(
+                            dict(
+                                id=cells[0],
+                                name=cells[1],
+                                evidence=tuple(cells[2].split(",")),
+                                when=cells[3],
+                            )
+                        )
+            self.requirements = requirements
+            self.limits = limits
             self.mapping = buckets["mapping"]
             self.key = buckets["key"]
+            self.operation = buckets["operation"]
             self.anomaly = buckets["anomaly"]
             self.noise = buckets["noise"]
             self.mtime = mtime
             self.loaded_at = time.time()
             self.error = None
             return True
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             self.error = str(exc)
             return False
 
@@ -325,10 +382,12 @@ class Spec:
         return {
             "mapping": len(self.mapping),
             "key": len(self.key),
+            "operation": len(self.operation),
             "anomaly": len(self.anomaly),
             "noise": len(self.noise),
             "path": str(self.path),
             "error": self.error,
+            "limits": self.limits,
         }
 
     def classify(self, message: str, raw: str, level: str | None) -> dict:
@@ -336,8 +395,8 @@ class Spec:
 
         1. log level E/C (including empty ---E---) -> anomaly
         2. anomaly table
-        3. noise table
-        4. step mapping + key-info tables
+        3. settings/switch/control operations (retain specific business mappings)
+        4. noise table, then step mapping + key-info tables
         5. unmatched parsed lines hidden by default
         """
         msg = message or ""
@@ -352,41 +411,61 @@ class Spec:
                         return rule
             return None
 
-        if level in ("E", "C"):
-            empty = not msg.strip()
-            return {
-                "step": "空错误行" if empty else (msg.strip()[:80] or "错误"),
+        operation = first_hit(self.operation)
+        hit = None
+        src = "unmatched"
+        for source, rules in (
+            ("anomaly", self.anomaly),
+            ("noise", self.noise),
+            ("mapping", self.mapping),
+            ("key", self.key),
+        ):
+            hit = first_hit(rules)
+            if hit:
+                src = source
+                break
+            if source == "anomaly" and operation:
+                # Broad transport/state-machine noise must not swallow actions.
+                # Preserve page/task identity and named settings before fallback.
+                mapping = first_hit(self.mapping)
+                key = first_hit(self.key) if mapping is None else None
+                hit = mapping or key or operation
+                src = "mapping" if mapping else "key" if key else "operation"
+                break
+        out = (
+            apply_threshold(_from_rule(hit, src), hit, msg)
+            if hit
+            else {
+                "step": "",
                 "category": "other",
-                "timeline": "show",
-                "mark": "anomaly",
-                "source": "level",
-                "rule": f"level:{level}",
+                "timeline": "hide",
+                "mark": "none",
+                "source": "unmatched",
+                "rule": "",
+                "event_id": "",
+                "track": "",
+                "parent": "",
             }
-
-        hit = first_hit(self.anomaly)
-        if hit:
-            return _from_rule(hit, "anomaly")
-
-        hit = first_hit(self.noise)
-        if hit:
-            out = _from_rule(hit, "noise")
-            out["timeline"] = hit.get("timeline") or "hide"
-            out["category"] = hit.get("category") or "noise"
-            return out
-
-        hit = first_hit(self.mapping) or first_hit(self.key)
-        if hit:
-            src = "mapping" if hit in self.mapping else "key"
-            return apply_threshold(_from_rule(hit, src), hit, msg)
-
-        return {
-            "step": "",
-            "category": "other",
-            "timeline": "hide",
-            "mark": "none",
-            "source": "unmatched",
-            "rule": "",
-        }
+        )
+        if level in ("E", "C"):
+            out.update(mark="anomaly", timeline="show")
+            if not hit:
+                out.update(
+                    step="空错误行" if not msg.strip() else msg.strip()[:80],
+                    source="level",
+                    rule=f"level:{level}",
+                )
+        elif level == "W":
+            if out["source"] == "noise":
+                out.update(
+                    category="other", mark="key", timeline="show", source="level"
+                )
+                out["notes"] = (
+                    out.get("notes", "") + "；警告级转储保留为排查提醒"
+                ).strip("；")
+            elif not hit:
+                out.update(step="警告", mark="key", timeline="show", source="level")
+        return out
 
 
 def _from_rule(rule: dict, source: str) -> dict:
@@ -397,4 +476,8 @@ def _from_rule(rule: dict, source: str) -> dict:
         "mark": rule.get("mark") or "none",
         "source": source,
         "rule": rule.get("match") or "",
+        "event_id": rule.get("event_id") or "",
+        "track": rule.get("track") or "",
+        "parent": rule.get("parent") or "",
+        "notes": rule.get("notes") or "",
     }

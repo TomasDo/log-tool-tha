@@ -432,3 +432,12 @@ h1 { font-size: 16px; margin: 0; font-weight: 650; }
 .tline.play.startup, .tline.play.version {
   background: rgba(255, 90, 90, 0.18);
 }
+
+#tl-toolbar { flex-wrap: wrap; }
+#search-log { color: #e5eaf2; background: #182332; border: 1px solid #43536a; border-radius: 4px; padding: 5px 8px; width: 215px; }
+#event-details { flex: 0 0 auto; padding: 7px 14px; border-bottom: 1px solid #334155; font-size: 12px; }
+#event-details summary { cursor: pointer; color: #c5d4e5; }
+#event-detail { max-height: 145px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; margin: 6px 0; }
+#upload-status { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 150px; overflow: auto; }
+
+[hidden] { display: none !important; }

@@ -24,7 +24,7 @@ class SpecTests(unittest.TestCase):
     def test_spec_loads(self):
         self.assertIsNone(SPEC.error)
         self.assertGreater(SPEC.counts()["mapping"], 10)
-        self.assertGreater(SPEC.counts()["noise"], 5)
+        self.assertGreater(SPEC.counts()["noise"], 0)
         self.assertGreater(SPEC.counts()["anomaly"], 3)
 
     def test_no_ndi_failed_rule(self):
@@ -33,13 +33,13 @@ class SpecTests(unittest.TestCase):
 
     def test_threshold_only_on_error_amplitude(self):
         keyed = [r for r in SPEC.key if r.get("threshold") is not None]
-        matches = {r["match"] for r in keyed}
+        matches = {r["event_id"] for r in keyed}
         self.assertEqual(
             matches,
             {
-                "probe calibration error",
-                "effector calibration error",
-                "hip register calculate error",
+                "probe_error",
+                "effector_error",
+                "hip_error",
             },
         )
         for r in SPEC.key:
@@ -79,14 +79,14 @@ class SpecTests(unittest.TestCase):
         self.assertEqual(cup["step"], "选择装杯杆")
         self.assertEqual(cup["mark"], "key")
         echo_colon = SPEC.classify("set tool type: 2", "", "I")
-        self.assertEqual(echo_colon["timeline"], "hide")
-        self.assertNotEqual(echo_colon["mark"], "key")
+        self.assertEqual(echo_colon["timeline"], "show")
+        self.assertEqual(echo_colon["mark"], "key")
         echo_num = SPEC.classify("set tool type 2", "", "I")
-        self.assertEqual(echo_num["timeline"], "hide")
-        self.assertNotEqual(echo_num["mark"], "key")
+        self.assertEqual(echo_num["timeline"], "show")
+        self.assertEqual(echo_num["mark"], "key")
         echo_side = SPEC.classify("set tool side 1", "", "I")
-        self.assertEqual(echo_side["timeline"], "hide")
-        self.assertNotEqual(echo_side["mark"], "key")
+        self.assertEqual(echo_side["timeline"], "show")
+        self.assertEqual(echo_side["mark"], "key")
 
 
 class NleTests(unittest.TestCase):
@@ -106,7 +106,7 @@ class NleTests(unittest.TestCase):
         events = classify_events(parse_log_lines(lines, "2026-04-01"), SPEC)
         nle = build_nle(events, lines)
         cases = [c for c in nle["tracks"]["cases"] if c.get("uuid")]
-        self.assertEqual(len(cases), 1)
+        self.assertEqual(len(cases), 2)  # Actual intervals; one UUID summary below.
         self.assertEqual(cases[0]["uuid"], uid)
         self.assertIn("50/42", cases[0]["label"])
         self.assertIn("左", cases[0]["label"])
@@ -210,8 +210,9 @@ class NleTests(unittest.TestCase):
         self.assertTrue(all(it["line"] != 3 for it in items))
         inc = next(it for it in items if it["label"] == "外展角")
         self.assertAlmostEqual(inc["delta"], 3.5)
-        self.assertEqual(inc["level"], "anomaly")
-        self.assertTrue(any(f["level"] == "anomaly" for f in flags))
+        self.assertEqual(inc["level"], "key")
+        self.assertEqual(inc["threshold_level"], "anomaly")
+        self.assertEqual(flags, [{"line": 4, "level": "key"}])
 
     def test_kuka_disconnect_only_after_start(self):
         lines = [
@@ -224,7 +225,8 @@ class NleTests(unittest.TestCase):
         events = classify_events(parse_log_lines(lines, None), SPEC)
         pre = next(e for e in events if e["line"] == 2)
         post = next(e for e in events if e["line"] == 5)
-        self.assertEqual(pre["timeline"], "hide")
+        self.assertEqual(pre["timeline"], "show")
+        self.assertEqual(pre["mark"], "key")
         self.assertEqual(post["mark"], "anomaly")
 
     def test_crash_block(self):

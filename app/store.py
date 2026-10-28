@@ -1,7 +1,11 @@
 """Imported log files on disk (data/logs + data/index.json)."""
+
 from __future__ import annotations
 
 import json
+import hashlib
+import threading
+from functools import wraps
 import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -17,11 +21,21 @@ def _now() -> str:
     return datetime.now(CST).isoformat(timespec="seconds")
 
 
+def locked(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+
+    return call
+
+
 class Store:
     def __init__(self, data_dir: Path | None = None):
         self.data_dir = Path(data_dir) if data_dir else DATA_DIR
         self.logs_dir = self.data_dir / "logs"
         self.index_path = self.data_dir / "index.json"
+        self.lock = threading.RLock()
         self.logs_dir.mkdir(parents=True, exist_ok=True)
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
@@ -40,7 +54,14 @@ class Store:
 
     def list_logs(self) -> list[dict]:
         logs = list(self._load().get("logs") or [])
-        logs.sort(key=lambda x: (x.get("date") or "", x.get("start_time") or "", x.get("imported_at") or ""), reverse=True)
+        logs.sort(
+            key=lambda x: (
+                x.get("date") or "",
+                x.get("start_time") or "",
+                x.get("imported_at") or "",
+            ),
+            reverse=True,
+        )
         return logs
 
     def get(self, log_id: str) -> dict | None:
@@ -52,12 +73,25 @@ class Store:
     def stored_path(self, item: dict) -> Path:
         return self.logs_dir / item["stored_name"]
 
+    @locked
     def add(self, original_name: str, content: bytes, meta: dict) -> dict:
         size = meta.get("size") or len(content)
         data = self._load()
+        digest = hashlib.sha256(content).hexdigest()
         for rec in data.get("logs") or []:
-            if rec.get("original_name") == original_name and rec.get("size") == size:
-                return rec
+            if not rec.get("sha256"):
+                old = self.stored_path(rec)
+                if old.is_file():
+                    rec["sha256"] = hashlib.sha256(old.read_bytes()).hexdigest()
+            if rec.get("sha256") == digest:
+                aliases = rec.setdefault("aliases", [])
+                if (
+                    original_name != rec["original_name"]
+                    and original_name not in aliases
+                ):
+                    aliases.append(original_name)
+                self._save(data)
+                return {**rec, "duplicate": True}
         log_id = uuid.uuid4().hex
         suffix = Path(original_name).suffix or ".txt"
         stored_name = f"{log_id}{suffix}"
@@ -68,6 +102,9 @@ class Store:
             "original_name": original_name,
             "stored_name": stored_name,
             "size": size,
+            "sha256": digest,
+            "source_mtime": meta.get("source_mtime"),
+            "file_quality": meta.get("file_quality"),
             "line_count": meta.get("line_count", 0),
             "parsed_count": meta.get("parsed", 0),
             "date": meta.get("date"),
@@ -87,9 +124,33 @@ class Store:
         self._save(data)
         return rec
 
+    @locked
+    def update_meta(self, log_id, meta):
+        data = self._load()
+        for rec in data.get("logs", []):
+            if rec["id"] == log_id:
+                for key in (
+                    "date",
+                    "date_source",
+                    "file_quality",
+                    "start_time",
+                    "end_time",
+                ):
+                    if (
+                        key not in ("date", "date_source")
+                        or meta.get("date") is not None
+                    ):
+                        rec[key] = meta.get(key)
+                rec["counts"] = {
+                    key: meta.get(key, 0)
+                    for key in ("total", "key", "anomaly", "noise", "shown")
+                }
+        self._save(data)
+
     def add_from_path(self, src: Path, original_name: str | None, meta: dict) -> dict:
         return self.add(original_name or src.name, src.read_bytes(), meta)
 
+    @locked
     def delete(self, log_id: str) -> bool:
         data = self._load()
         logs = data.get("logs") or []

@@ -101,6 +101,7 @@ const state = {
   hits: [],
   drawQueued: false,
   drag: null,
+  requestId: 0,
 };
 
 function fmtRange(log) {
@@ -133,7 +134,7 @@ async function refreshSpec() {
     const s = await api("/api/spec");
     const c = s.counts || {};
     $("spec-info").textContent =
-      `映射 ${c.mapping || 0} · 关键 ${c.key || 0} · 异常 ${c.anomaly || 0} · 噪声 ${c.noise || 0}`;
+      `映射 ${c.mapping || 0} · 关键 ${c.key || 0} · 操作 ${c.operation || 0} · 异常 ${c.anomaly || 0} · 噪声 ${c.noise || 0}`;
   } catch (e) {
     $("spec-info").textContent = "规则未加载";
   }
@@ -181,6 +182,10 @@ function renderList() {
       b.textContent = `异常 ${counts.anomaly}`;
       badges.appendChild(b);
     }
+    for (const text of [...((log.file_quality || {}).warnings || []), ...((log.aliases || []).length ? ["重复内容别名 " + log.aliases.length + " 个"] : [])]) {
+      const badge = document.createElement("span");
+      badge.className = "badge key"; badge.textContent = text; badges.append(badge);
+    }
     li.addEventListener("click", (ev) => {
       if (ev.target.closest("[data-del]")) return;
       selectLog(log.id);
@@ -210,12 +215,18 @@ function renderList() {
 
 async function selectLog(id) {
   state.selected = id;
+  state.data = null;
+  state.playhead = 1;
+  $("search-result").textContent = "";
   renderList();
   await loadTimeline();
 }
 
 function lineVisible(ln) {
+  if (state.data?.file_quality?.analyzable === false) return true;
+  if (Math.abs(ln.n - state.playhead) <= 3) return true;
   if ($("tog-all").checked) return true;
+  if (ln.timeline === "show") return true;
   if (ln.special === "startup" || ln.special === "version") return true;
   if (ln.mark === "key" || ln.mark === "anomaly") return true;
   if ($("tog-noise").checked && ln.noise) return true;
@@ -231,17 +242,28 @@ function rebuildViewLines() {
 
 async function loadTimeline(opts) {
   if (!state.selected) return;
+  $("prev-anomaly").disabled = $("next-anomaly").disabled = true;
+  const requestId = ++state.requestId;
+  const preserve = !!opts && !!state.data;
+  const viewport = {scale: state.scale, scrollX: state.scrollX};
   $("empty-state").hidden = true;
   $("timeline-wrap").hidden = false;
   const term = $("term");
   if (!state.data) term.innerHTML = `<p class="hint" style="padding:12px">加载中…</p>`;
   const qs = new URLSearchParams();
   if (opts && opts.center) qs.set("center", String(opts.center));
+  if (preserve && !qs.has("center")) qs.set("center",String(state.playhead));
   if (opts && opts.window) qs.set("window", String(opts.window));
+  if (opts && opts.q) {
+    qs.set("q", opts.q);qs.set("direction",opts.direction || "next");qs.set("after",String(opts.after || 0));
+  }
   try {
     const data = await api(`/api/logs/${state.selected}/timeline?${qs.toString()}`);
+    if (requestId !== state.requestId) return;
     state.data = data;
-    state.playhead = opts && opts.center ? opts.center : 1;
+    $("prev-anomaly").disabled = $("next-anomaly").disabled = data.file_quality?.analyzable === false;
+    state.playhead = data.search?.line || (opts && opts.center ? opts.center : preserve ? state.playhead : 1);
+    if (opts && opts.q) $("search-result").textContent = data.search.total ? `${data.search.total} 处 · 行 ${state.playhead}` : "没有匹配";
     state.follow = true;
     $("btn-follow").hidden = true;
     $("tl-title").textContent = data.name || "";
@@ -249,21 +271,40 @@ async function loadTimeline(opts) {
     if (data.date_source === "mtime") bits.push("日期取自文件时间");
     if (data.truncated) bits.push("事件已截断");
     if (data.lines_windowed) bits.push(`终端窗口 ${data.lines_start}–${data.lines_end}`);
+    bits.push(...((data.file_quality || {}).warnings || []));
     $("tl-meta").textContent = bits.join(" · ");
+    const rec = state.logs.find(r=>r.id===state.selected);
+    if (rec) {rec.counts=data.counts;rec.file_quality=data.file_quality;renderList();}
     renderCounts(data.counts || {});
     renderSummary(data.summaries || []);
     rebuildViewLines();
     renderLabels();
-    fitZoom();
+    if (preserve) {
+      state.scale=viewport.scale;state.scrollX=viewport.scrollX;
+      const width=$("nle-canvas").clientWidth;
+      const target=(state.playhead-1)*state.scale;
+      if (target < state.scrollX || target > state.scrollX+width) state.scrollX=clamp(target-width/2,0,maxScroll());
+    }
+    else fitZoom();
     renderTerm();
     scrollTermToPlayhead();
+    updateEventDetail();
     queueDraw();
   } catch (e) {
-    term.innerHTML = `<p class="err" style="padding:12px">${e.message}</p>`;
+    if (requestId !== state.requestId) return;
+    $("prev-anomaly").disabled = $("next-anomaly").disabled = false;
+    state.data = null;
+    renderSummary([]);
+    $("counts").textContent = "无法分析";
+    $("event-detail").textContent = "";
+    term.replaceChildren();
+    const error=document.createElement("p");error.className="err";error.textContent=e.message;term.append(error);
+
   }
 }
 
 function renderCounts(c) {
+  if (state.data?.file_quality?.analyzable === false) {$("counts").textContent="仅查看原文 · 未执行 Oberon 分析";$("return-count").textContent=`${state.data.line_count} 行`;return;}
   $("counts").innerHTML = `
     <div class="count"><b>${c.total || 0}</b><span>总计</span></div>
     <div class="count k"><b>${c.key || 0}</b><span>重点</span></div>
@@ -285,7 +326,7 @@ function renderSummary(summaries) {
   if (!items.length) {
     const empty = document.createElement("div");
     empty.className = "ps-empty";
-    empty.textContent = "暂无手术方案";
+    empty.textContent = state.data?.file_quality?.analyzable === false ? "本文件仅供原文查看" : "暂无手术方案";
     el.append(empty);
     return;
   }
@@ -346,6 +387,7 @@ function summaryStep(st) {
   }
   hd.append(mark, body);
   wrap.append(hd);
+  if (st.evidence) hd.title = `依据：行 ${st.evidence.line} · ${st.evidence.message}`;
   if (st.line) hd.addEventListener("click", (ev) => jumpLine(ev, st.line));
   const planes = st.planes || [];
   if (planes.length) {
@@ -427,7 +469,11 @@ function canvasSize(cv) {
 function minScale() {
   const cv = $("nle-canvas");
   const w = cv.clientWidth || 800;
-  return Math.min(MAX_SCALE, w / Math.max(1, lineCount()));
+  return w / Math.max(1, lineCount());
+}
+
+function maxScale() {
+  return Math.max(MAX_SCALE, minScale() * 4);
 }
 
 function maxScroll() {
@@ -775,7 +821,7 @@ function drawNle() {
   drawSpans(ctx, tracks.l2, byKey.l2.y, byKey.l2.h, (s) => L2_COLOR[s.label] || "#5aa6e8", "l2");
   drawSpans(ctx, tracks.l3, byKey.l3.y, byKey.l3.h, (s) => L3_COLOR[s.label] || "#e07070", "l3");
   if (byKey.device) {
-    drawSpans(ctx, tracks.device, byKey.device.y, byKey.device.h, (s) => DEV_COLOR[s.label] || "#6a7c8f", "device");
+    drawSpans(ctx, tracks.device, byKey.device.y, byKey.device.h, (s) => s.mark === "anomaly" ? "#ff5c5c" : DEV_COLOR[s.label] || "#6a7c8f", "device");
   }
 
   // exit markers: thin dim line
@@ -887,6 +933,8 @@ async function setPlayhead(n, fromTerm) {
   const next = clamp(n | 0, 1, lineCount());
   const changed = next !== state.playhead;
   state.playhead = next;
+  rebuildViewLines();
+  updateEventDetail();
   if (state.data && state.data.lines_windowed) {
     if (next < state.data.lines_start || next > state.data.lines_end) {
       await loadTimeline({ center: next });
@@ -972,6 +1020,7 @@ function renderTerm() {
     lv.textContent = ln.lv || "";
     lv.className = "tlv" + (ln.lv ? ` lv-${ln.lv}` : "");
     el.querySelector(".traw").textContent = ln.raw || "";
+    el.title = [ln.step, ln.session_id, ln.case_id, ln.notes].filter(Boolean).join(" · ");
   }
 }
 
@@ -996,11 +1045,15 @@ function tipHtml(hit) {
   const errs = s.errors || [];
   if (errs.length) {
     for (const e of errs) {
-      const flag = e.over ? "  >1mm" : "";
+      const flag = e.over ? `  >${e.threshold ?? 1}mm` : "";
       out += `\n${e.label}  ${Number(e.value).toFixed(2)} mm${flag}`;
     }
     if (s.error_max != null) out += `\n最大  ${Number(s.error_max).toFixed(2)} mm`;
   }
+  if (s.session_id) out += `\n${s.session_id}`;
+  if (s.case_id) out += `\n方案 ${s.case_id}`;
+  if (s.notes) out += `\n${s.notes}`;
+  if (s.result_state) out += `\n${s.result_state}`;
   const cuts = s.cut_deltas || [];
   if (cuts.length) {
     for (const c of cuts) {
@@ -1009,7 +1062,9 @@ function tipHtml(hit) {
         continue;
       }
       const unit = c.unit === "mm" ? "mm" : "°";
-      const flag = c.over2 ? "  重点" : c.over1 ? "  标注" : "";
+      const flag = c.over2 ? "  偏差超阈值" : c.over1 ? "  偏差提醒" : "";
+      if (c.coordinate) out += `\n${c.coordinate} · ${c.target_source || "缺少目标"}${c.target_line ? " · 目标行 " + c.target_line : ""}`;
+      if (c.assessment === "process_snapshot") out += " · 过程位姿快照";
       if (c.plan == null || c.delta == null || c.measured == null) {
         const meas = c.measured != null ? Number(c.measured).toFixed(2) : "—";
         out += `\n${c.label}  实测 ${meas} ${unit}${flag}`;
@@ -1127,14 +1182,14 @@ function bindNle() {
   $("btn-zoom-in").addEventListener("click", () => {
     const cvw = $("nle-canvas").clientWidth / 2;
     const line = (cvw + state.scrollX) / state.scale;
-    state.scale = clamp(state.scale * 1.25, minScale(), MAX_SCALE);
+    state.scale = clamp(state.scale * 1.25, minScale(), maxScale());
     state.scrollX = clamp(line * state.scale - cvw, 0, maxScroll());
     queueDraw();
   });
   $("btn-zoom-out").addEventListener("click", () => {
     const cvw = $("nle-canvas").clientWidth / 2;
     const line = (cvw + state.scrollX) / state.scale;
-    state.scale = clamp(state.scale / 1.25, minScale(), MAX_SCALE);
+    state.scale = clamp(state.scale / 1.25, minScale(), maxScale());
     state.scrollX = clamp(line * state.scale - cvw, 0, maxScroll());
     queueDraw();
   });
@@ -1227,7 +1282,7 @@ function bindKeys() {
   });
   window.addEventListener("resize", () => {
     if (!state.data) return;
-    state.scale = clamp(state.scale, minScale(), MAX_SCALE);
+    state.scale = clamp(state.scale, minScale(), maxScale());
     state.scrollX = clamp(state.scrollX, 0, maxScroll());
     renderTerm();
     queueDraw();
@@ -1240,6 +1295,7 @@ $("file-input").addEventListener("change", async (ev) => {
   if (!files.length) return;
   const fd = new FormData();
   for (const f of files) fd.append("files", f, f.name);
+  fd.append("last_modified", JSON.stringify(Object.fromEntries(files.map(f=>[f.name,f.lastModified]))));
   $("upload-status").textContent = `正在导入 ${files.length} 个文件…`;
   try {
     const res = await fetch("/api/logs", { method: "POST", body: fd });
@@ -1247,7 +1303,9 @@ $("file-input").addEventListener("change", async (ev) => {
     if (!res.ok) throw new Error(data.error || "导入失败");
     const n = (data.imported || []).length;
     const errn = (data.errors || []).length;
-    $("upload-status").textContent = `已导入 ${n} 个` + (errn ? `，失败 ${errn}` : "");
+    const duplicates=(data.imported || []).filter(f=>f.duplicate).length;
+    $("upload-status").textContent = `已导入 ${n} 个` + (duplicates ? `（重复 ${duplicates} 个，复用已有副本）` : "") +
+      (errn ? `，失败 ${errn}：` + data.errors.map(e=>`${e.name}: ${e.error}`).join("；") : "");
     await refreshLogs();
     if (data.imported && data.imported[0]) selectLog(data.imported[0].id);
   } catch (e) {
@@ -1271,6 +1329,40 @@ $("reload-spec").addEventListener("click", async () => {
   await refreshSpec();
   if (state.selected) await loadTimeline({ center: state.playhead });
 });
+
+function updateEventDetail() {
+  const row=(state.data?.lines || []).find(l=>l.n===state.playhead);
+  const ev=(state.data?.events || []).find(e=>e.line<=state.playhead && e.line_end>=state.playhead);
+  $("event-title").textContent = row ? `行 ${row.n} · ${row.step || "原始日志"}` : "点击事件查看证据与上下文";
+  if (!row) {$("event-detail").textContent="";return;}
+  const parts=[row.step || "未映射事件", `行 ${ev?.line || row.n}–${ev?.line_end || row.n}`,
+    row.session_id || "无会话", row.case_id ? `方案 ${row.case_id}` : "未关联方案",row.notes || ""];
+  for (const m of row.metrics || []) {
+    const unit=m.unit==="mm"?"mm":"°";
+    parts.push(`${m.coordinate} ${m.label}: 实测 ${m.measured} ${unit}` +
+      (m.plan!=null ? `，目标 ${m.plan}，Δ ${Number(m.delta).toFixed(2)} ${unit}，目标行 ${m.target_line}（${m.target_source}）` : "，缺少目标") +
+      (m.unit==="deg" ? `；偏差提醒 >${m.limits.angle_key}° / 超阈值 >${m.limits.angle_anomaly}°` : ""));
+    if (m.assessment_reason) parts.push(m.assessment_reason);
+  }
+  if (ev?.value_mm!=null) parts.push(`误差 ${ev.value_mm} mm，排查阈值 >${ev.threshold} mm`);
+  parts.push(ev?.raw || row.raw);
+  $("event-detail").textContent=parts.filter(Boolean).join("\n");
+}
+function seekAnomaly(direction) {
+  const lines=state.data?.ticks?.anomaly || [];
+  if (!lines.length) {$("search-result").textContent="没有异常事件";return;}
+  const target=direction>0 ? lines.find(n=>n>state.playhead) ?? lines[0] : [...lines].reverse().find(n=>n<state.playhead) ?? lines[lines.length-1];
+  setPlayhead(target);
+}
+function searchLog(direction) {
+  const q=$("search-log").value.trim();
+  if (q) loadTimeline({q,direction,after:state.playhead});
+}
+$("prev-anomaly").addEventListener("click",()=>seekAnomaly(-1));
+$("next-anomaly").addEventListener("click",()=>seekAnomaly(1));
+$("search-prev").addEventListener("click",()=>searchLog("prev"));
+$("search-next").addEventListener("click",()=>searchLog("next"));
+$("search-log").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();searchLog(e.shiftKey?"prev":"next");}});
 
 bindNle();
 bindTerm();

@@ -45,9 +45,16 @@
         <div id="tl-toolbar">
           <label><input type="checkbox" id="tog-noise" /> 显示噪声</label>
           <label><input type="checkbox" id="tog-all" /> 显示全部</label>
+          <button id="prev-anomaly" type="button">上一异常</button>
+          <button id="next-anomaly" type="button">下一异常</button>
+          <input id="search-log" type="search" placeholder="搜索原文（包含隐藏行）" aria-label="搜索日志原文" />
+          <button id="search-prev" type="button">上一处</button>
+          <button id="search-next" type="button">下一处</button>
+          <span id="search-result"></span>
           <span id="return-count"></span>
           <span id="play-info"></span>
         </div>
+        <details id="event-details"><summary id="event-title">点击事件查看证据与上下文</summary><pre id="event-detail"></pre></details>
         <div id="workspace">
           <div id="term-wrap">
             <div id="term"></div>

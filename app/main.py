@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
 """Oberon log analysis server — stdlib http.server, bind 0.0.0.0:8765."""
+
 from __future__ import annotations
 
 import json
+import os
+import re
+import tempfile
 import sys
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,6 +24,7 @@ from parser import (  # noqa: E402
     filter_events,
     parse_and_classify,
     to_public_event,
+    summarize,
 )
 from spec import Spec  # noqa: E402
 from store import Store  # noqa: E402
@@ -30,7 +35,11 @@ PORT = 8765
 MAX_UPLOAD = 80 * 1024 * 1024
 
 SPEC = Spec()
-STORE = Store()
+STORE = Store(
+    Path(os.environ["LOG_TOOL_DATA_DIR"])
+    if os.environ.get("LOG_TOOL_DATA_DIR")
+    else None
+)
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -66,8 +75,6 @@ def _parse_multipart(body: bytes, content_type: str) -> list[tuple[str, bytes]]:
             continue
         if content.endswith(b"\r\n"):
             content = content[:-2]
-        if content.endswith(b"--"):
-            content = content[:-2]
         headers = {}
         for line in header_blob.decode("utf-8", errors="replace").split("\r\n"):
             if ":" in line:
@@ -91,7 +98,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
 
-    def _send(self, code: int, body: bytes, content_type: str, extra: dict | None = None) -> None:
+    def _send(
+        self, code: int, body: bytes, content_type: str, extra: dict | None = None
+    ) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -178,12 +187,30 @@ class Handler(BaseHTTPRequestHandler):
                         "noise": [r["match"] for r in SPEC.noise],
                         "mapping": [r["match"] for r in SPEC.mapping],
                         "key": [r["match"] for r in SPEC.key],
+                        "operation": [r["match"] for r in SPEC.operation],
                     },
                 },
             )
             return
         if path == "/api/logs":
-            self._json(200, {"logs": STORE.list_logs()})
+            logs = STORE.list_logs()
+            for rec in logs:
+                try:
+                    _, meta = parse_and_classify(
+                        STORE.stored_path(rec),
+                        SPEC,
+                        rec.get("original_name"),
+                        rec.get("source_mtime"),
+                    )
+                    rec["counts"] = {
+                        key: meta.get(key, 0)
+                        for key in ("total", "key", "anomaly", "noise", "shown")
+                    }
+                    rec["file_quality"] = meta["file_quality"]
+                except (OSError, ValueError) as exc:
+                    rec["file_quality"] = {"analyzable": False, "warnings": [str(exc)]}
+                    rec["counts"] = {}
+            self._json(200, {"logs": logs})
             return
         parts = path.strip("/").split("/")
         # /api/logs/{id} or /api/logs/{id}/timeline
@@ -208,7 +235,13 @@ class Handler(BaseHTTPRequestHandler):
         if not path.is_file():
             self._json(404, {"error": "stored file missing"})
             return
-        events, meta = parse_and_classify(path, SPEC, rec.get("original_name"))
+        try:
+            events, meta = parse_and_classify(
+                path, SPEC, rec.get("original_name"), rec.get("source_mtime")
+            )
+        except ValueError as exc:
+            self._json(422, {"error": str(exc)})
+            return
         raw_text = path.read_text(encoding="utf-8", errors="replace")
         raw_lines = raw_text.splitlines()
         center = window = None
@@ -222,7 +255,30 @@ class Handler(BaseHTTPRequestHandler):
                 window = int((qs.get("window") or ["0"])[0])
         except ValueError:
             window = None
+        search = (qs.get("q") or [""])[0].casefold()
+        direction = (qs.get("direction") or ["next"])[0]
+        after = int((qs.get("after") or ["0"])[0])
+        matches = [
+            i
+            for i, raw in enumerate(raw_lines, 1)
+            if search and search in raw.casefold()
+        ]
+        candidates = reversed(matches) if direction == "prev" else iter(matches)
+        target = next(
+            (
+                i
+                for i in candidates
+                if (i < after if direction == "prev" else i > after)
+            ),
+            None,
+        )
+        if matches and target is None:
+            target = matches[-1] if direction == "prev" else matches[0]
+        if target:
+            center = target
         nle = build_nle(events, raw_lines, center=center, window=window)
+        meta.update(summarize(events))
+        STORE.update_meta(rec["id"], meta)
         visible = filter_events(events, show_noise=show_noise, show_all=show_all)
         truncated = False
         total = len(events)
@@ -250,9 +306,11 @@ class Handler(BaseHTTPRequestHandler):
                 "hidden_noise": meta["noise"],
                 "returned": len(visible),
             },
+            "search": {"total": len(matches), "line": target},
             "truncated": truncated,
             "filtered_default": not show_all,
             "spec": SPEC.counts(),
+            "file_quality": meta["file_quality"],
             "events": [to_public_event(ev, i) for i, ev in enumerate(visible)],
             "line_count": nle["line_count"],
             "lines": nle["lines"],
@@ -265,27 +323,17 @@ class Handler(BaseHTTPRequestHandler):
         }
         self._json(200, payload)
 
-    def _import_one(self, name: str, content: bytes, source_path: Path | None = None) -> dict:
-        if source_path is not None and source_path.is_file():
-            _events, meta = parse_and_classify(source_path, SPEC, name)
-            rec = STORE.add(name, content, meta)
-        else:
-            tmp = STORE.logs_dir / f".upload-{Path(name).name}"
-            tmp.write_bytes(content)
-            try:
-                _events, meta = parse_and_classify(tmp, SPEC, name)
-                rec = STORE.add(name, content, meta)
-            finally:
-                if tmp.exists():
-                    try:
-                        tmp.unlink()
-                    except OSError:
-                        pass
+    def _import_one(self, name, content, source_path=None, source_mtime=None):
+        if source_path is not None:
+            source_mtime = source_path.stat().st_mtime
+        with tempfile.NamedTemporaryFile(dir=STORE.logs_dir, suffix=".txt") as tmp:
+            tmp.write(content)
+            tmp.flush()
+            events, meta = parse_and_classify(Path(tmp.name), SPEC, name, source_mtime)
+        meta["source_mtime"] = source_mtime
+        rec = STORE.add(name, content, meta)
         rec["_preview"] = {
-            "total": meta["total"],
-            "key": meta["key"],
-            "anomaly": meta["anomaly"],
-            "noise": meta["noise"],
+            key: meta.get(key, 0) for key in ("total", "key", "anomaly", "noise")
         }
         return rec
 
@@ -305,11 +353,27 @@ class Handler(BaseHTTPRequestHandler):
             if not files:
                 self._json(400, {"error": "no files in upload"})
                 return
+            # Browser sends per-file original lastModified in milliseconds.
+            encoded = re.search(rb'name="last_modified"\r\n\r\n([^\r\n]+)', body)
+            try:
+                modified = json.loads(encoded[1]) if encoded else {}
+            except (ValueError, TypeError):
+                modified = {}
             imported = []
             errors = []
             for name, content in files:
                 try:
-                    imported.append(self._import_one(name, content))
+                    imported.append(
+                        self._import_one(
+                            name,
+                            content,
+                            source_mtime=(
+                                float(modified[name]) / 1000
+                                if modified.get(name) is not None
+                                else None
+                            ),
+                        )
+                    )
                 except Exception as exc:
                     errors.append({"name": name, "error": str(exc)})
             self._json(200, {"imported": imported, "errors": errors})
@@ -357,7 +421,10 @@ class Handler(BaseHTTPRequestHandler):
 def serve(host: str = HOST, port: int = PORT) -> None:
     SPEC.maybe_reload()
     httpd = ThreadingHTTPServer((host, port), Handler)
-    print(f"Oberon log tool  http://{host}:{port}  spec={SPEC.path}  rules={SPEC.counts()}", flush=True)
+    print(
+        f"Oberon log tool  http://{host}:{port}  spec={SPEC.path}  rules={SPEC.counts()}",
+        flush=True,
+    )
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
