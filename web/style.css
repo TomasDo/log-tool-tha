@@ -14,7 +14,7 @@
   --green: #6ec89a;
   --accent: #3d8fd4;
   --term-bg: #0a0e13;
-  --play: #ff5a5a;
+  --play: #79b8ff;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.28);
   font-family: "Noto Sans CJK SC", "Noto Sans SC", "Source Han Sans SC",
     "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
@@ -253,7 +253,7 @@ h1 { font-size: 16px; margin: 0; font-weight: 650; }
 }
 .tline:hover { background: rgba(90, 166, 232, 0.08); }
 .tline.play {
-  background: rgba(255, 90, 90, 0.16);
+  background: rgba(121, 184, 255, 0.16);
   box-shadow: inset 3px 0 0 var(--play);
 }
 .tline.key .traw { color: #e0b03a; }
@@ -324,8 +324,9 @@ h1 { font-size: 16px; margin: 0; font-weight: 650; }
 #nle-main {
   flex: 1; min-height: 0;
   display: grid;
+  overflow-y: auto;
   grid-template-columns: 88px minmax(0, 1fr) 200px;
-  grid-template-rows: 22px minmax(0, 1fr);
+  grid-template-rows: 22px minmax(var(--track-height, 282px), 1fr);
 }
 #overview {
   grid-column: 2;
@@ -430,7 +431,7 @@ h1 { font-size: 16px; margin: 0; font-weight: 650; }
   text-underline-offset: 2px;
 }
 .tline.play.startup, .tline.play.version {
-  background: rgba(255, 90, 90, 0.18);
+  background: rgba(121, 184, 255, 0.18);
 }
 
 #tl-toolbar { flex-wrap: wrap; }

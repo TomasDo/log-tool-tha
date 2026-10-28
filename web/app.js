@@ -3,6 +3,7 @@ const $ = (id) => document.getElementById(id);
 const LINE_H = 18;
 const RULER_H = 28;
 const MAX_SCALE = 2;
+const PLAYHEAD_COLOR = "#79b8ff";
 const TRACKS = [
   { key: "cases", name: "手术", h: 72 },
   { key: "log", name: "日志", h: 36 },
@@ -218,6 +219,7 @@ async function selectLog(id) {
   state.data = null;
   state.playhead = 1;
   $("search-result").textContent = "";
+  $("nle-main").scrollTop = 0;
   renderList();
   await loadTimeline();
 }
@@ -242,6 +244,7 @@ function rebuildViewLines() {
 
 async function loadTimeline(opts) {
   if (!state.selected) return;
+  $("nle-tip").hidden = true;
   $("prev-anomaly").disabled = $("next-anomaly").disabled = true;
   const requestId = ++state.requestId;
   const preserve = !!opts && !!state.data;
@@ -417,6 +420,7 @@ function summaryPlane(p) {
 }
 
 function renderLabels() {
+  $("nle-main").style.setProperty("--track-height", `${RULER_H + TRACKS.reduce((sum, track) => sum + track.h, 0)}px`);
   const labs = $("nle-labels");
   const rows = [{ name: "行号", h: RULER_H, ruler: true }, ...TRACKS];
   labs.innerHTML = rows
@@ -589,10 +593,10 @@ function drawPlayhead(ctx, h) {
   ctx.moveTo(x, 0);
   ctx.lineTo(x, h);
   ctx.stroke();
-  ctx.strokeStyle = "#ff4d4d";
+  ctx.strokeStyle = PLAYHEAD_COLOR;
   ctx.lineWidth = 1.5;
   ctx.stroke();
-  ctx.fillStyle = "#ff4d4d";
+  ctx.fillStyle = PLAYHEAD_COLOR;
   ctx.beginPath();
   ctx.moveTo(x - 6, 0);
   ctx.lineTo(x + 6, 0);
@@ -890,7 +894,7 @@ function drawOverview() {
   ctx.strokeStyle = "rgba(255,255,255,0.7)";
   ctx.strokeRect(x0, 1, Math.max(2, x1 - x0), h - 2);
   const ph = px(state.playhead);
-  ctx.fillStyle = "#ff4d4d";
+  ctx.fillStyle = PLAYHEAD_COLOR;
   ctx.fillRect(ph, 0, 2, h);
   for (const m of (data.tracks && data.tracks.markers) || []) {
     if (m.kind !== "startup") continue;
@@ -900,6 +904,7 @@ function drawOverview() {
 }
 
 function queueDraw() {
+  $("nle-tip").hidden = true;
   if (state.drawQueued) return;
   state.drawQueued = true;
   requestAnimationFrame(() => {
@@ -933,6 +938,10 @@ async function setPlayhead(n, fromTerm) {
   const next = clamp(n | 0, 1, lineCount());
   const changed = next !== state.playhead;
   state.playhead = next;
+  if (!fromTerm) {
+    state.follow = true;
+    $("btn-follow").hidden = true;
+  }
   rebuildViewLines();
   updateEventDetail();
   if (state.data && state.data.lines_windowed) {
@@ -1082,6 +1091,7 @@ function bindNle() {
   const cv = $("nle-canvas");
   const ov = $("overview");
   const tip = $("nle-tip");
+  cv.addEventListener("pointerleave", () => { tip.hidden = true; });
 
   cv.addEventListener("wheel", (ev) => {
     if (!state.data) return;
@@ -1280,13 +1290,21 @@ function bindKeys() {
       setPlayhead(lineCount());
     }
   });
-  window.addEventListener("resize", () => {
+}
+
+function bindLayout() {
+  const refresh = () => {
     if (!state.data) return;
     state.scale = clamp(state.scale, minScale(), maxScale());
     state.scrollX = clamp(state.scrollX, 0, maxScroll());
-    renderTerm();
+    if (state.follow) scrollTermToPlayhead();
+    else renderTerm();
     queueDraw();
-  });
+  };
+  window.addEventListener("resize", refresh);
+  const observer = new ResizeObserver(refresh);
+  observer.observe($("nle-canvas"));
+  observer.observe($("term"));
 }
 
 $("file-input").addEventListener("change", async (ev) => {
@@ -1315,7 +1333,8 @@ $("file-input").addEventListener("change", async (ev) => {
 
 $("tog-noise").addEventListener("change", () => {
   rebuildViewLines();
-  renderTerm();
+  if (state.follow) scrollTermToPlayhead();
+  else renderTerm();
   queueDraw();
 });
 $("tog-all").addEventListener("change", () => {
@@ -1368,5 +1387,6 @@ bindNle();
 bindTerm();
 bindSplit();
 bindKeys();
+bindLayout();
 refreshSpec();
 refreshLogs();
